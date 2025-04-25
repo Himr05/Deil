@@ -126,53 +126,73 @@ def register():
     return render_template('register.html')
 
 @app.route('/profesional', methods=['GET', 'POST'])
-def profesional_dashboard():
-    if 'user_id' not in session or session['role'] != 'Profesional':
-        flash('Acceso no autorizado', 'error')
+def profesional():
+    if 'user_id' not in session or session.get('role') != 'Profesional':
+        flash('Acceso denegado.', 'error')
         return redirect(url_for('login'))
+    
+    user_id = session['user_id']
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute("SELECT name FROM users WHERE id = ?", (user_id,))
+    user_name = c.fetchone()[0]
+    
     if request.method == 'POST':
-        task_id = request.form.get('task_id')
-        action = request.form.get('action')
-        with get_db() as conn:
-            c = conn.cursor()
-            if action == 'recibido':
-                c.execute('UPDATE tasks SET status = ? WHERE id = ? AND assigned_to = ?',
-                          ('Amarillo', task_id, session['name']))
-                c.execute('INSERT INTO history (task_id, action, user, created_at) VALUES (?, ?, ?, ?)',
-                          (task_id, 'Recibido', session['name'], datetime.now()))
-                conn.commit()
-                flash('Tarea marcada como recibida', 'success')
-            elif action == 'guardar':
-                if 'pdf' not in request.files:
-                    flash('No se seleccionó ningún archivo', 'error')
-                    return redirect(url_for('profesional_dashboard'))
-                file = request.files['pdf']
-                if file.filename == '':
-                    flash('No se seleccionó ningún archivo', 'error')
-                    return redirect(url_for('profesional_dashboard'))
-                if not allowed_file(file.filename):
-                    flash('Solo se permiten archivos PDF', 'error')
-                    return redirect(url_for('profesional_dashboard'))
-                if not check_file_size(file):
-                    flash('El archivo excede el límite de 5 MB', 'error')
-                    return redirect(url_for('profesional_dashboard'))
-                if not check_pdf_count():
-                    flash('Se ha alcanzado el límite de 100 PDFs', 'error')
-                    return redirect(url_for('profesional_dashboard'))
-                filename = secure_filename(f"{task_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+        if 'receive_task' in request.form:
+            task_id = request.form['receive_task']
+            c.execute("UPDATE tasks SET status = 'Amarillo' WHERE id = ?", (task_id,))
+            c.execute('INSERT INTO history (task_id, action, user, created_at) VALUES (?, ?, ?, ?)',
+                      (task_id, 'Recibido', user_name, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            conn.commit()
+            flash('Tarea marcada como recibida.', 'success')
+            return redirect(url_for('profesional'))
+        
+        elif 'upload_pdf' in request.form:
+            task_id = request.form['upload_pdf']
+            file = request.files['pdf']
+            if file and file.filename.endswith('.pdf'):
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"{task_id}_{timestamp}.pdf"
                 file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                 file.save(file_path)
-                c.execute('UPDATE tasks SET status = ?, pdf_path = ? WHERE id = ? AND assigned_to = ?',
-                          ('Naranja', file_path, task_id, session['name']))
+                c.execute("UPDATE tasks SET status = 'Naranja', pdf_path = ? WHERE id = ?", (file_path, task_id))
                 c.execute('INSERT INTO history (task_id, action, user, created_at) VALUES (?, ?, ?, ?)',
-                          (task_id, 'PDF Subido', session['name'], datetime.now()))
+                          (task_id, 'PDF subido', user_name, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
                 conn.commit()
-                flash('PDF subido exitosamente', 'success')
-    with get_db() as conn:
-        c = conn.cursor()
-        c.execute('SELECT * FROM tasks WHERE assigned_to = ?', (session['name'],))
-        tasks = c.fetchall()
-    return render_template('profesional.html', tasks=tasks)
+                
+                # Obtener el título y número de la tarea
+                c.execute("SELECT title, number FROM tasks WHERE id = ?", (task_id,))
+                task = c.fetchone()
+                task_title = task[0]
+                task_number = task[1]
+                
+                # Obtener los correos de los usuarios con rol Subdireccion_Investigaciones
+                c.execute("SELECT email FROM users WHERE role = 'Subdireccion_Investigaciones'")
+                subdireccion_emails = [row[0] for row in c.fetchall()]
+                
+                # Enviar correo a cada usuario de Subdirección
+                if subdireccion_emails:
+                    print(f"Enviando correo a Subdirección: {subdireccion_emails}")
+                    for email in subdireccion_emails:
+                        subject = "Tarea Actualizada - Revisión Requerida - DEIL"
+                        body = f"Hola,\n\nEl Profesional {user_name} ha subido un PDF para la tarea:\nTítulo: {task_title}\nNúmero: {task_number}\n\nPor favor, revisa y aprueba en el sistema.\n\nSaludos,\nEquipo DEIL"
+                        send_email(email, subject, body)
+                else:
+                    print("No se encontraron usuarios con rol Subdireccion_Investigaciones")
+                
+                flash('PDF subido exitosamente.', 'success')
+            else:
+                flash('Por favor, sube un archivo PDF válido.', 'error')
+            return redirect(url_for('profesional'))
+    
+    c.execute("SELECT * FROM tasks WHERE assigned_to = ? AND status IN ('Verde', 'Amarillo')", (user_name,))
+    tasks = c.fetchall()
+    tasks = [dict(id=row[0], title=row[1], number=row[2], reading=row[3], instructions=row[4],
+                  assigned_to=row[5], status=row[6], created_at=row[7], pdf_path=row[8]) for row in tasks]
+    
+    conn.close()
+    return render_template('profesional.html', user_name=user_name, tasks=tasks)
+           
 
 @app.route('/investigaciones', methods=['GET', 'POST'])
 def investigaciones_dashboard():
@@ -202,24 +222,42 @@ def investigaciones_dashboard():
 
 @app.route('/assign_task', methods=['POST'])
 def assign_task():
-    if 'user_id' not in session or session['role'] not in ['Subdireccion_Investigaciones', 'Superusuario']:
-        flash('Acceso no autorizado', 'error')
+    if 'user_id' not in session or session.get('role') != 'Subdireccion_Investigaciones':
+        flash('Acceso denegado.', 'error')
         return redirect(url_for('login'))
-    title = request.form['title']
-    number = request.form['number']
-    reading = request.form['reading']
-    instructions = request.form['instructions']
-    assigned_to = request.form['assigned_to']
-    with get_db() as conn:
+    
+    if request.method == 'POST':
+        title = request.form['title']
+        number = request.form['number']
+        reading = request.form['reading']
+        instructions = request.form['instructions']
+        assigned_to = request.form['assigned_to']
+        
+        created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        status = 'Verde'
+        
+        conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
-        c.execute('INSERT INTO tasks (title, number, reading, instructions, status, assigned_by, assigned_to) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                  (title, number, reading, instructions, 'Verde', session['name'], assigned_to))
-        task_id = c.lastrowid
-        c.execute('INSERT INTO history (task_id, action, user, created_at) VALUES (?, ?, ?, ?)',
-                  (task_id, 'Asignada', session['name'], datetime.now()))
+        c.execute("INSERT INTO tasks (title, number, reading, instructions, assigned_to, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                  (title, number, reading, instructions, assigned_to, status, created_at))
         conn.commit()
-    flash('Tarea asignada exitosamente', 'success')
-    return redirect(url_for('investigaciones_dashboard'))
+        
+        # Obtener el correo del Profesional asignado
+        c.execute("SELECT email FROM users WHERE name = ?", (assigned_to,))
+        result = c.fetchone()
+        if result:
+            professional_email = result[0]
+            print(f"Intentando enviar correo a: {professional_email}")
+            # Enviar correo al Profesional
+            subject = "Nueva Tarea Asignada - DEIL"
+            body = f"Hola {assigned_to},\n\nSe te ha asignado una nueva tarea:\nTítulo: {title}\nNúmero: {number}\nLectura: {reading}\nInstrucciones: {instructions}\n\nPor favor, revisa el sistema para más detalles.\n\nSaludos,\nEquipo DEIL"
+            send_email(professional_email, subject, body)
+        else:
+            print(f"No se encontró correo para el usuario: {assigned_to}")
+        
+        flash('Tarea asignada exitosamente.', 'success')
+        conn.close()
+        return redirect(url_for('investigaciones'))
 
 @app.route('/despacho', methods=['GET', 'POST'])
 def despacho_dashboard():
