@@ -363,4 +363,278 @@ def send_email(recipient_email, subject, body):
         server.quit()
         print(f"Correo enviado a {recipient_email}")
     except Exception as e:
-        print(f"Error al enviar correo a {recipient_email}: {e}")
+        print(f"Error al enviar correo a {recipient_email}: {e}")from flask import Flask, render_template, request, redirect, url_for, flash, session, send_file
+import sqlite3
+from datetime import datetime
+import os
+
+app = Flask(__name__)
+app.secret_key = 'your_secret_key_here'
+DATABASE = 'deil.db'
+app.config['UPLOAD_FOLDER'] = 'uploads'
+
+def init_db():
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name TEXT NOT NULL,
+                  email TEXT NOT NULL UNIQUE,
+                  password TEXT NOT NULL,
+                  phone TEXT NOT NULL,
+                  role TEXT NOT NULL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS tasks
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  title TEXT NOT NULL,
+                  number TEXT NOT NULL,
+                  reading TEXT NOT NULL,
+                  instructions TEXT,
+                  assigned_to TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  pdf_path TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS history
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task_id INTEGER,
+                  action TEXT NOT NULL,
+                  user TEXT NOT NULL,
+                  created_at TEXT NOT NULL)''')
+    c.execute('''INSERT OR IGNORE INTO users (name, email, password, phone, role)
+                 VALUES (?, ?, ?, ?, ?)''',
+              ('Superusuario', 'Admin_DEIL2025', 'Admin_DEIL2025', '00000000', 'Superusuario'))
+    conn.commit()
+    conn.close()
+
+init_db()
+
+@app.route('/')
+def index():
+    if 'user_id' in session:
+        role = session.get('role')
+        if role == 'Superusuario':
+            return redirect(url_for('consultas'))
+        elif role == 'Profesional':
+            return redirect(url_for('profesional'))
+        elif role == 'Subdireccion_Investigaciones':
+            return redirect(url_for('investigaciones_dashboard'))
+        elif role == 'Encargada_Despacho':
+            return redirect(url_for('despacho'))
+    return render_template('index.html')
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        name = request.form['name']
+        email = request.form['email']
+        password = request.form['password']
+        phone = request.form['phone']
+        role = request.form['role']
+
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        try:
+            c.execute("INSERT INTO users (name, email, password, phone, role) VALUES (?, ?, ?, ?, ?)",
+                      (name, email, password, phone, role))
+            conn.commit()
+            flash('Usuario registrado exitosamente.', 'success')
+            return redirect(url_for('login'))
+        except sqlite3.IntegrityError:
+            flash('El correo ya está registrado.', 'error')
+        finally:
+            conn.close()
+    return render_template('register.html')
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form['email']
+        password = request.form['password']
+
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE email = ? AND password = ?", (email, password))
+        user = c.fetchone()
+
+        if user:
+            session['user_id'] = user[0]
+            session['role'] = user[5]
+            if user[5] == 'Superusuario':
+                return redirect(url_for('consultas'))
+            elif user[5] == 'Profesional':
+                return redirect(url_for('profesional'))
+            elif user[5] == 'Subdireccion_Investigaciones':
+                return redirect(url_for('investigaciones_dashboard'))
+            elif user[5] == 'Encargada_Despacho':
+                return redirect(url_for('despacho'))
+        else:
+            flash('Correo o contraseña incorrectos.', 'error')
+        conn.close()
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.pop('user_id', None)
+    session.pop('role', None)
+    flash('Has cerrado sesión.', 'success')
+    return redirect(url_for('login'))
+
+@app.route('/profesional', methods=['GET', 'POST'])
+def profesional():
+    if 'user_id' not in session or session.get('role') != 'Profesional':
+        flash('Acceso denegado.', 'error')
+        return redirect(url_for('login'))
+
+    user_id = session['user_id']
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute("SELECT name FROM users WHERE id = ?", (user_id,))
+    user_name = c.fetchone()[0]
+
+    if request.method == 'POST':
+        if 'receive_task' in request.form:
+            task_id = request.form['receive_task']
+            c.execute("UPDATE tasks SET status = 'Amarillo' WHERE id = ?", (task_id,))
+            c.execute('INSERT INTO history (task_id, action, user, created_at) VALUES (?, ?, ?, ?)',
+                      (task_id, 'Recibido', user_name, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            conn.commit()
+            flash('Tarea marcada como recibida.', 'success')
+            return redirect(url_for('profesional'))
+
+        elif 'upload_pdf' in request.form:
+            task_id = request.form['upload_pdf']
+            file = request.files['pdf']
+            if file and file.filename.endswith('.pdf'):
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"{task_id}_{timestamp}.pdf"
+                file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                file.save(file_path)
+                c.execute("UPDATE tasks SET status = 'Naranja', pdf_path = ? WHERE id = ?", (file_path, task_id))
+                c.execute('INSERT INTO history (task_id, action, user, created_at) VALUES (?, ?, ?, ?)',
+                          (task_id, 'PDF subido', user_name, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+                conn.commit()
+                flash('PDF subido exitosamente.', 'success')
+            else:
+                flash('Por favor, sube un archivo PDF válido.', 'error')
+            return redirect(url_for('profesional'))
+
+    c.execute("SELECT * FROM tasks WHERE assigned_to = ? AND status IN ('Verde', 'Amarillo')", (user_name,))
+    tasks = c.fetchall()
+    tasks = [dict(id=row[0], title=row[1], number=row[2], reading=row[3], instructions=row[4],
+                  assigned_to=row[5], status=row[6], created_at=row[7], pdf_path=row[8]) for row in tasks]
+
+    conn.close()
+    return render_template('profesional.html', user_name=user_name, tasks=tasks)
+
+@app.route('/investigaciones_dashboard', methods=['GET', 'POST'])
+def investigaciones_dashboard():
+    if 'user_id' not in session or session.get('role') != 'Subdireccion_Investigaciones':
+        flash('Acceso denegado.', 'error')
+        return redirect(url_for('login'))
+
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+
+    if request.method == 'POST':
+        if 'approve_task' in request.form:
+            task_id = request.form['approve_task']
+            c.execute("UPDATE tasks SET status = 'Azul' WHERE id = ?", (task_id,))
+            c.execute('INSERT INTO history (task_id, action, user, created_at) VALUES (?, ?, ?, ?)',
+                      (task_id, 'Aprobada', session.get('user_id'), datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            conn.commit()
+            flash('Tarea aprobada.', 'success')
+            return redirect(url_for('investigaciones_dashboard'))
+
+    c.execute("SELECT * FROM tasks WHERE status IN ('Verde', 'Naranja')")
+    tasks = c.fetchall()
+    tasks = [dict(id=row[0], title=row[1], number=row[2], reading=row[3], instructions=row[4],
+                  assigned_to=row[5], status=row[6], created_at=row[7], pdf_path=row[8]) for row in tasks]
+
+    c.execute("SELECT name FROM users WHERE role = 'Profesional'")
+    professionals = [row[0] for row in c.fetchall()]
+
+    conn.close()
+    return render_template('investigaciones.html', tasks=tasks, professionals=professionals)
+
+@app.route('/assign_task', methods=['POST'])
+def assign_task():
+    if 'user_id' not in session or session.get('role') != 'Subdireccion_Investigaciones':
+        flash('Acceso denegado.', 'error')
+        return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        title = request.form['title']
+        number = request.form['number']
+        reading = request.form['reading']
+        instructions = request.form['instructions']
+        assigned_to = request.form['assigned_to']
+
+        created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        status = 'Verde'
+
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        c.execute("INSERT INTO tasks (title, number, reading, instructions, assigned_to, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                  (title, number, reading, instructions, assigned_to, status, created_at))
+        c.execute('INSERT INTO history (task_id, action, user, created_at) VALUES (?, ?, ?, ?)',
+                  (c.lastrowid, 'Asignada', session.get('user_id'), created_at))
+        conn.commit()
+
+        flash('Tarea asignada exitosamente.', 'success')
+        conn.close()
+        return redirect(url_for('investigaciones_dashboard'))
+
+@app.route('/despacho', methods=['GET', 'POST'])
+def despacho():
+    if 'user_id' not in session or session.get('role') != 'Encargada_Despacho':
+        flash('Acceso denegado.', 'error')
+        return redirect(url_for('login'))
+
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+
+    if request.method == 'POST':
+        if 'finalize_task' in request.form:
+            task_id = request.form['finalize_task']
+            c.execute("UPDATE tasks SET status = 'Gris' WHERE id = ?", (task_id,))
+            c.execute('INSERT INTO history (task_id, action, user, created_at) VALUES (?, ?, ?, ?)',
+                      (task_id, 'Finalizada', session.get('user_id'), datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            conn.commit()
+            flash('Tarea finalizada.', 'success')
+            return redirect(url_for('despacho'))
+
+    c.execute("SELECT * FROM tasks WHERE status = 'Azul'")
+    tasks = c.fetchall()
+    tasks = [dict(id=row[0], title=row[1], number=row[2], reading=row[3], instructions=row[4],
+                  assigned_to=row[5], status=row[6], created_at=row[7], pdf_path=row[8]) for row in tasks]
+
+    conn.close()
+    return render_template('despacho.html', tasks=tasks)
+
+@app.route('/consultas')
+def consultas():
+    if 'user_id' not in session or session.get('role') != 'Superusuario':
+        flash('Acceso denegado.', 'error')
+        return redirect(url_for('login'))
+
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute("SELECT * FROM tasks")
+    tasks = c.fetchall()
+    tasks = [dict(id=row[0], title=row[1], number=row[2], reading=row[3], instructions=row[4],
+                  assigned_to=row[5], status=row[6], created_at=row[7], pdf_path=row[8]) for row in tasks]
+
+    c.execute("SELECT * FROM history")
+    history = c.fetchall()
+    history = [dict(id=row[0], task_id=row[1], action=row[2], user=row[3], created_at=row[4]) for row in history]
+
+    conn.close()
+    return render_template('consultas.html', tasks=tasks, history=history)
+
+@app.route('/download/<path:filename>')
+def download_file(filename):
+    return send_file(os.path.join(app.config['UPLOAD_FOLDER'], filename), as_attachment=True)
+
+if __name__ == '__main__':
+    if not os.path.exists(app.config['UPLOAD_FOLDER']):
+        os.makedirs(app.config['UPLOAD_FOLDER'])
+    app.run(debug=True)
