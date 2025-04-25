@@ -1,6 +1,9 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, session, send_from_directory
 import sqlite3
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from werkzeug.utils import secure_filename
 
@@ -16,6 +19,28 @@ if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+def send_email(recipient_email, subject, body):
+    sender_email = "deilorganismolegislativo@gmail.com"
+    sender_password = "jwnd abwa tgmi khrw"  # Usa tu contraseña de aplicación real
+    
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = recipient_email
+    msg['Subject'] = subject
+    
+    msg.attach(MIMEText(body, 'plain'))
+    
+    try:
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        text = msg.as_string()
+        server.sendmail(sender_email, recipient_email, text)
+        server.quit()
+        print(f"Correo enviado a {recipient_email}")
+    except Exception as e:
+        print(f"Error al enviar correo a {recipient_email}: {e}")
 
 def init_db():
     with sqlite3.connect(DATABASE) as conn:
