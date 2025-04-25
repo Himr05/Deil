@@ -279,3 +279,25 @@ if __name__ == '__main__':
     if not os.path.exists(DATABASE):
         init_db()
     app.run(debug=True)
+
+def send_email(recipient_email, subject, body):
+    sender_email = "deilorganismolegislativo@gmail.com"  # Reemplaza con tu correo
+    sender_password = "jwnd abwa tgmi khrw"  # Reemplaza con la contraseña de aplicación
+    
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = recipient_email
+    msg['Subject'] = subject
+    
+    msg.attach(MIMEText(body, 'plain'))
+    
+    try:
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        text = msg.as_string()
+        server.sendmail(sender_email, recipient_email, text)
+        server.quit()
+        print(f"Correo enviado a {recipient_email}")
+    except Exception as e:
+        print(f"Error al enviar correo a {recipient_email}: {e}")
